@@ -33,6 +33,19 @@
 #include <iostream>
 #include <stdio.h>
 
+using namespace clang;
+
+bool hasBreak(std::string &str){
+	auto n = str.find("break;");
+	return !(n == std::string::npos);
+}
+
+void eraseBreak(std::string &str){
+	auto n = str.find("break;");
+	if(n != std::string::npos)
+		str.erase(n, 6);
+}
+
 namespace PointerFinder {
 
 /// Callback class for matches on the AST.
@@ -57,107 +70,117 @@ namespace PointerFinder {
         /// pointer type, verifies that if the variable is named, its name begins with
         /// a 'p_'. Otherwise emits a diagnostic and FixItHint.
         void run(const MatchResult &Result) {
-            const auto *switchStmt = Result.Nodes.getNodeAs<clang::SwitchStmt>("switchStmt");
+            
+            const SwitchStmt *switchStatement = Result.Nodes.getNodeAs<clang::SwitchStmt>("switchStmt");
             const clang::SourceManager *SM = Result.SourceManager;
+            SourceRange sourceRange;
 
-            clang::SourceRange range = switchStmt->getSourceRange();
-//            llvm::outs() << "------ \nSwitch body" << "\n";
-//            llvm::StringRef ref = clang::Lexer::getSourceText(
-//                    clang::CharSourceRange::getCharRange({range.getBegin(), range.getEnd().getLocWithOffset(1)}), *SM,
-//                    Result.Context->getLangOpts());
-//            llvm::outs() << ref.str() << "\n";
+            //making a string from the switch condition
+            const Expr *condExpr = switchStatement->getCond();
+            bool invalid;
+            std::string condition = Lexer::getSourceText(CharSourceRange(condExpr->getSourceRange(), true),
+                                    *SM, Result.Context->getLangOpts(), &invalid).str();
+            bool isVariable = find_if(condition.begin(), condition.end(),
+                                [](char c) { return !(isalnum(c)); }) == condition.end();
+            if(!isVariable){
+                condition.insert(0, 1, '(').append(")");
+            }
+            condition.append(" == ");
 
-            std::string replacedTxt;
-            std::string condTxt;
-            std::string prependTxt;
-            bool firstIfPrinted = false;
+            const SwitchCase *caseList = switchStatement->getSwitchCaseList();
+            //checking if the switch has a default case
+            bool hasDefault = false;
+            sourceRange.setBegin(caseList->getKeywordLoc());
+            sourceRange.setEnd(caseList->getKeywordLoc().getLocWithOffset(6));
+            std::string lastCase = Lexer::getSourceText(CharSourceRange(sourceRange, true),
+                                *SM, Result.Context->getLangOpts(), &invalid).str();
+            if(lastCase.compare("default") == 0){
+                hasDefault = true;
+            }
+            
+            //creating a vector of statement strings
+            //Note: starts from bottom to top case
+            const Stmt *body = switchStatement->getBody();
+            sourceRange.setBegin(caseList->getColonLoc().getLocWithOffset(1));
+            sourceRange.setEnd(body->getLocEnd().getLocWithOffset(-1));
+            std::vector<std::string> caseStatements;
 
-            if (const clang::VarDecl *DeclCond = switchStmt->getConditionVariable()) {
-                condTxt = DeclCond->getNameAsString();
-                clang::CharSourceRange condRange = clang::CharSourceRange::getTokenRange(DeclCond->getLocStart(),
-                                                                                         DeclCond->getLocEnd());
-                std::string defTxt = clang::Lexer::getSourceText(condRange, *SM, Result.Context->getLangOpts()).str();
-                std::cout << "Condition: " << condTxt << "\n";
-                std::cout << "! Prepend this: " << defTxt << "\n";
-                prependTxt.append(defTxt);
-            } else {
-                const auto *Cond = switchStmt->getCond();
-                clang::CharSourceRange condRange = clang::CharSourceRange::getTokenRange(Cond->getLocStart(),
-                                                                                         Cond->getLocEnd());
-                condTxt = clang::Lexer::getSourceText(condRange, *SM, Result.Context->getLangOpts()).str();
-                std::cout << "Condition: " << condTxt << "\n";
+            caseStatements.push_back(Lexer::getSourceText(CharSourceRange(sourceRange, true),
+                                    *SM, Result.Context->getLangOpts(), &invalid).str());
+            while(caseList->getNextSwitchCase() != nullptr){
+                sourceRange.setBegin(caseList->getNextSwitchCase()->getColonLoc().getLocWithOffset(1));
+                sourceRange.setEnd(caseList->getKeywordLoc().getLocWithOffset(-1));
+                caseStatements.emplace_back(Lexer::getSourceText(CharSourceRange(sourceRange, true),
+                                            *SM, Result.Context->getLangOpts(), &invalid).str());
+                caseList = caseList->getNextSwitchCase();
             }
 
-
-            // ide unazad wtf
-            for (const clang::SwitchCase *sc = switchStmt->getSwitchCaseList(); sc != nullptr; sc = sc->getNextSwitchCase()) {
-                if (firstIfPrinted) replacedTxt.append(" else ");
-
-                std::vector<const clang::SwitchCase *> uslovi;
-                uslovi.push_back(sc);
-                const clang::SwitchCase * substmt = sc;
-                while (llvm::isa<clang::SwitchCase>(substmt->getSubStmt())) {
-                    substmt = clang::dyn_cast<clang::SwitchCase>(substmt->getSubStmt());
-                    uslovi.push_back(substmt);
-
-                    std::string blockTxt = extractStringFromExpr(substmt, *SM, Result.Context->getLangOpts());
-
-                    std::cout << "dodatni uslov " << "\n";
-//                    std::cout << "uslov " << blockTxt << "\n";
+            //Note: for fall throughs we need to move from right to left
+            //to respect the case order
+            int i;
+            for(i = caseStatements.size()-1; i>=0; i--){
+                if(!hasBreak(caseStatements[i])){
+                    for(int j=i-1; j>=0; j--){
+                        if(hasBreak(caseStatements[j])){
+                            caseStatements[i].append(caseStatements[j]);
+                            eraseBreak(caseStatements[i]);
+                            break;
+                        }
+                        caseStatements[i].append(caseStatements[j]);
+                    }
                 }
-
-                if (!llvm::isa<clang::DefaultStmt>(sc)) {
-                    auto caseStmt = clang::dyn_cast<clang::CaseStmt>(sc);
-                    std::string label = extractStringFromExpr(caseStmt->getLHS(), *SM, Result.Context->getLangOpts());
-                    replacedTxt.append("if (").append(condTxt).append(" == ").append(label).append(") ");
-                }
-
-                replacedTxt.append("{\n");
-                // TODO does not work
-//                while (substmt && substmt->getSubStmt()) {
-//                    substmt = clang::dyn_cast<clang::CaseStmt>(substmt->getSubStmt());
-//                    std::string blockTxt = extractStringFromExpr(substmt, *SM, Result.Context->getLangOpts());
-//                    replacedTxt.append(blockTxt).append(";\n");
-//                    std::cout << "stmt " << blockTxt << "\n";
-//                }
-
-                replacedTxt.append("}");
-
-                if (!firstIfPrinted) firstIfPrinted = true;
+                else
+                    eraseBreak(caseStatements[i]);
             }
 
+            //adding if-elseif-else
+            //reseting back after making the vector
+            caseList = switchStatement->getSwitchCaseList();
+            //Note: we are moving through the vector from
+            //left to right when falling through
+            bool defaultCaseRewritten = false;
+            int numberOfStmts=caseStatements.size();
+            i=0;
+            SourceLocation nextCaseLoc = body->getLocEnd();
 
-            Rewrite.ReplaceText(range, prependTxt.append(replacedTxt));
+            while(caseList != nullptr && i<numberOfStmts){
+                if(hasDefault == true && defaultCaseRewritten == false){
+                    Rewrite.InsertTextBefore(caseList->getKeywordLoc(), "}else{\n");
+                    Rewrite.ReplaceText(caseList->getKeywordLoc(), 7, "");
+                    Rewrite.ReplaceText(caseList->getColonLoc(), 1, "");
 
+                    sourceRange.setBegin(caseList->getColonLoc().getLocWithOffset(1));
+                    sourceRange.setEnd(nextCaseLoc.getLocWithOffset(-1));
+                    //indentCaseStmt(caseStatements[i]);
+                    Rewrite.ReplaceText(sourceRange, caseStatements[i]);
 
-            /*const auto* Decl = Result.Nodes.getNodeAs<clang::SwitchStmt>("switchStmt");
+                    defaultCaseRewritten = true;
+                    nextCaseLoc = caseList->getKeywordLoc();
+                    caseList = caseList->getNextSwitchCase();
+                    i++;
+                    continue;
+                }
+                if(caseList->getNextSwitchCase() == nullptr){
+                    Rewrite.InsertTextBefore(caseList->getKeywordLoc(), std::string{"if("}.append(condition));
+                }else{
+                    Rewrite.InsertTextBefore(caseList->getKeywordLoc(), std::string{"}else if("}.append(condition));
+                }
+                Rewrite.ReplaceText(caseList->getKeywordLoc(), 4, "");
+                Rewrite.ReplaceText(caseList->getColonLoc(), 1, "){\n");
 
-            const auto Cond = Decl->getCond();
+                //indentCaseStmt(caseStatements[i]);
+                sourceRange.setBegin(caseList->getColonLoc().getLocWithOffset(1));
+                sourceRange.setEnd(nextCaseLoc.getLocWithOffset(-1));
+                Rewrite.ReplaceText(sourceRange, caseStatements[i]);
 
-
-            clang::SourceRange range = Decl->getCond()->getSourceRange();
-            const clang::SourceManager *SM = Result.SourceManager;
-
-            clang::CharSourceRange conditionRange = clang::CharSourceRange::getTokenRange(Cond->getLocStart(), Cond->getLocEnd());
-
-            llvm::StringRef condTxt = clang::Lexer::getSourceText(conditionRange, *SM, Result.Context->getLangOpts());
-
-            llvm::outs() << condTxt.str() << "\n";
-            return;
-
-            clang::DiagnosticsEngine& Diagnostics = Result.Context->getDiagnostics();
-            const unsigned ID =
-                Diagnostics.getCustomDiagID(clang::DiagnosticsEngine::Warning,
-                                            "asd '%0' dsa "
-                                            "have a 'p_' prefix");
-
-            clang::DiagnosticBuilder Builder = Diagnostics.Report(Decl->getSwitchLoc(), ID);
-            Builder.AddString("SWITCH");
-
-            const auto Start = Decl->getSwitchLoc();
-            const auto End = Start.getLocWithOffset(16);
-            const auto Range = clang::CharSourceRange::getCharRange({Start, End});
-            Builder.AddSourceRange(Range);*/
+                nextCaseLoc = caseList->getKeywordLoc();
+                caseList = caseList->getNextSwitchCase();
+                i++;
+            }
+            //removing space from switch to the first case
+            sourceRange.setBegin(switchStatement->getSwitchLoc());
+            sourceRange.setEnd(nextCaseLoc.getLocWithOffset(-1));
+            Rewrite.RemoveText(sourceRange);
 
         }
 
