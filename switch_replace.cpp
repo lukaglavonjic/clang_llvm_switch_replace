@@ -30,6 +30,28 @@
 #include <vector>
 #include <iostream>
 
+bool hasBreak(std::string &str){
+    auto n = str.find("break;");
+    return !(n == std::string::npos);
+}
+
+std::string eraseBreak(std::string &str){
+    std::string copy = std::string("");
+    copy = str;
+    auto n = copy.find("break;");
+    if(n != std::string::npos)
+        copy.erase(n, 6);
+    return copy;
+}
+
+std::string eraseNewRow(std::string str){
+    std::string copy = std::string("");
+    copy = str;
+    copy.erase(copy.find_last_not_of(" \n\r\t")+1);
+    
+    return copy;
+}
+
 namespace PointerFinder {
 
 /// Callback class for matches on the AST.
@@ -133,15 +155,24 @@ namespace PointerFinder {
                 }
 
                 replacedTxt.append("{\n");
-                replacedTxt.append(caseBodies[i + skipNext]);
-                replacedTxt.append("}");
+                replacedTxt.append(eraseBreak(caseBodies[i + skipNext]));
 
-                if (!firstIfPrinted) firstIfPrinted = true;
-                i++;
-            }
+		
+		int startBody = i + skipNext;
+		while(!hasBreak(caseBodies[startBody])){
+			replacedTxt.append("\n");
+			replacedTxt.append(eraseNewRow(eraseBreak(caseBodies[startBody + 1])));
+			startBody++;
+		}
+		
+        replacedTxt.append("\n    }");
 
-            Rewrite.ReplaceText(range, prependTxt.append(replacedTxt));
+        if (!firstIfPrinted) firstIfPrinted = true;
+            i++;
         }
+
+        Rewrite.ReplaceText(range, prependTxt.append(replacedTxt));
+    }
 
     private:
         clang::Rewriter &Rewrite;
