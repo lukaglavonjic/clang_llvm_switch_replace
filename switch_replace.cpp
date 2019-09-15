@@ -44,7 +44,7 @@ std::string eraseBreak(std::string &str){
     return copy;
 }
 
-std::string eraseNewRow(std::string str){
+std::string rTrim(std::string str){
     std::string copy = std::string("");
     copy = str;
     copy.erase(copy.find_last_not_of(" \n\r\t")+1);
@@ -52,7 +52,12 @@ std::string eraseNewRow(std::string str){
     return copy;
 }
 
-namespace PointerFinder {
+bool isEmpty(std::string str){
+    auto n = str.find_last_not_of(" \n\r\t");
+    return n == std::string::npos;
+}
+
+namespace SwitchIfElse {
 
 /// Callback class for matches on the AST.
     class MatchHandlerSwitch : public clang::ast_matchers::MatchFinder::MatchCallback {
@@ -70,11 +75,6 @@ namespace PointerFinder {
 
         using MatchResult = clang::ast_matchers::MatchFinder::MatchResult;
 
-        /// Handles a match result for a pointer variable.
-        ///
-        /// Given a matched `DeclaratorDecl` (i.e. `VarDecl` or `FieldDecl`) with
-        /// pointer type, verifies that if the variable is named, its name begins with
-        /// a 'p_'. Otherwise emits a diagnostic and FixItHint.
         void run(const MatchResult &Result) {
             const auto *switchStmt = Result.Nodes.getNodeAs<clang::SwitchStmt>("switchStmt");
             const clang::SourceManager *SM = Result.SourceManager;
@@ -86,6 +86,7 @@ namespace PointerFinder {
             std::string prependTxt;
             bool firstIfPrinted = false;
 
+            // Ukoliko postoji definisana promenljiva u sklopu uslova izdvajamo deklaraciju ispred if-else
             if (const clang::VarDecl *DeclCond = switchStmt->getConditionVariable()) {
                 condTxt.append(DeclCond->getNameAsString());
                 clang::CharSourceRange condRange = clang::CharSourceRange::getTokenRange(DeclCond->getLocStart(),
@@ -110,6 +111,7 @@ namespace PointerFinder {
             std::string caseBody = clang::Lexer::getSourceText(scRange, *SM, Result.Context->getLangOpts()).str();
             caseBodies.insert(caseBodies.begin(), 1, caseBody);
 
+            // Prikupljamo case-ove i njihova tela u listu
             for (const clang::SwitchCase *sc = switchStmt->getSwitchCaseList(); sc != nullptr; sc = sc->getNextSwitchCase()) {
                 cases.insert(cases.begin(), 1, sc);
                 if (sc->getNextSwitchCase() != nullptr) {
@@ -129,24 +131,28 @@ namespace PointerFinder {
                     i++;
                     continue;
                 }
+
+                // Ako smo vec stavili prvi if, svaki naredni treba da ima else
                 if (firstIfPrinted) replacedTxt.append(" else ");
 
-                std::vector<const clang::SwitchCase *> uslovi;
-                uslovi.push_back(sc);
+
+                std::vector<const clang::SwitchCase *> conditions;
+                conditions.push_back(sc);
                 const clang::SwitchCase * substmt = sc;
                 while (llvm::isa<clang::SwitchCase>(substmt->getSubStmt())) {
                     skipNext++;
                     substmt = clang::dyn_cast<clang::SwitchCase>(substmt->getSubStmt());
-                    uslovi.push_back(substmt);
+                    conditions.push_back(substmt);
                 }
 
+                // Ukoliko case na kom smo trenutno nije default, nadovezujemo uslove
                 if (!llvm::isa<clang::DefaultStmt>(sc)) {
                     replacedTxt.append("if (");
                     bool firstCond = true;
-                    for (const clang::SwitchCase *uslov : uslovi) {
+                    for (const clang::SwitchCase *condition : conditions) {
                             if (!firstCond)
                                 replacedTxt.append(" || ");
-                            auto caseStmt = clang::dyn_cast<clang::CaseStmt>(uslov);
+                            auto caseStmt = clang::dyn_cast<clang::CaseStmt>(condition);
                             std::string label = extractStringFromExpr(caseStmt->getLHS(), *SM, Result.Context->getLangOpts());
                             replacedTxt.append(condTxt).append(" == (").append(label).append(")");
                             firstCond = false;
@@ -154,25 +160,30 @@ namespace PointerFinder {
                     replacedTxt.append(") ");
                 }
 
+                // Na kraju navodjenja uslova, dodajemo novi red i telo od case a nakon toga nadovezujemo sva tela dok ne dodjemo do break
                 replacedTxt.append("{\n");
-                replacedTxt.append(eraseBreak(caseBodies[i + skipNext]));
+                replacedTxt.append(rTrim(eraseBreak(caseBodies[i + skipNext])));
 
-		
+		// Sve dok ne naidjemo na case gde ima break, nadovezujemo telo
 		int startBody = i + skipNext;
 		while(!hasBreak(caseBodies[startBody])){
-			replacedTxt.append("\n");
-			replacedTxt.append(eraseNewRow(eraseBreak(caseBodies[startBody + 1])));
+                        // Ukoliko je telo prazno, necemo ga ni nadovezati
+                        if(!isEmpty(caseBodies[startBody + 1])){
+			    replacedTxt.append("\n");
+                            replacedTxt.append(rTrim(eraseBreak(caseBodies[startBody + 1])));
+                        }
+			
 			startBody++;
 		}
 		
-        replacedTxt.append("\n    }");
+                replacedTxt.append("\n    }");
 
-        if (!firstIfPrinted) firstIfPrinted = true;
-            i++;
+                if (!firstIfPrinted) firstIfPrinted = true;
+                i++;
+            }
+
+            Rewrite.ReplaceText(range, prependTxt.append(replacedTxt));
         }
-
-        Rewrite.ReplaceText(range, prependTxt.append(replacedTxt));
-    }
 
     private:
         clang::Rewriter &Rewrite;
@@ -213,7 +224,7 @@ public:
     ASTConsumerPointer CreateASTConsumer(clang::CompilerInstance &Compiler,
                                          llvm::StringRef Filename) override {
         TheRewriter.setSourceMgr(Compiler.getSourceManager(), Compiler.getLangOpts());
-        return std::make_unique<PointerFinder::Consumer>(TheRewriter);
+        return std::make_unique<SwitchIfElse::Consumer>(TheRewriter);
     }
 
     bool BeginSourceFileAction(clang::CompilerInstance &Compiler,
@@ -229,11 +240,11 @@ public:
 private:
     clang::Rewriter TheRewriter;
 };
-// namespace PointerFinder
+// namespace SwitchIfElse
 
 namespace {
-    llvm::cl::extrahelp MoreHelp("\nMakes sure pointers have a 'p_' prefix\n");
-    llvm::cl::OptionCategory ToolCategory("PointerFinder");
+    llvm::cl::extrahelp MoreHelp("\nChange switch to if-else\n");
+    llvm::cl::OptionCategory ToolCategory("SwitchIfElse");
     llvm::cl::extrahelp
             CommonHelp(clang::tooling::CommonOptionsParser::HelpMessage);
 }  // namespace
