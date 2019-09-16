@@ -112,6 +112,7 @@ namespace SwitchIfElse {
             caseBodies.insert(caseBodies.begin(), 1, caseBody);
 
             // Prikupljamo case-ove i njihova tela u listu
+            // da bismo mogli da prolazimo kroz njih u normalnom poretku
             for (const clang::SwitchCase *sc = switchStmt->getSwitchCaseList(); sc != nullptr; sc = sc->getNextSwitchCase()) {
                 cases.insert(cases.begin(), 1, sc);
                 if (sc->getNextSwitchCase() != nullptr) {
@@ -164,18 +165,18 @@ namespace SwitchIfElse {
                 replacedTxt.append("{\n");
                 replacedTxt.append(rTrim(eraseBreak(caseBodies[i + skipNext])));
 
-		// Sve dok ne naidjemo na case gde ima break, nadovezujemo telo
-		int startBody = i + skipNext;
-		while(!hasBreak(caseBodies[startBody])){
-                        // Ukoliko je telo prazno, necemo ga ni nadovezati
-                        if(!isEmpty(caseBodies[startBody + 1])){
-			    replacedTxt.append("\n");
-                            replacedTxt.append(rTrim(eraseBreak(caseBodies[startBody + 1])));
-                        }
-			
-			startBody++;
-		}
-		
+                // Sve dok ne naidjemo na case gde ima break, nadovezujemo telo
+                int startBody = i + skipNext;
+                while (!hasBreak(caseBodies[startBody])) {
+                    // Ukoliko je telo prazno, necemo ga ni nadovezati
+                    if (!isEmpty(caseBodies[startBody + 1])) {
+                        replacedTxt.append("\n");
+                        replacedTxt.append(rTrim(eraseBreak(caseBodies[startBody + 1])));
+                    }
+
+                    startBody++;
+                }
+
                 replacedTxt.append("\n    }");
 
                 if (!firstIfPrinted) firstIfPrinted = true;
